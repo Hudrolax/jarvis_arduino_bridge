@@ -1,9 +1,10 @@
 from __future__ import annotations
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from .config import AppConfig, DEFAULT_CONFIG_PATH
+from .service import AppService
 
-def create_app(cfg: AppConfig) -> FastAPI:
+def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
     app = FastAPI(title="Jarvis Arduino Bridge", docs_url=None, redoc_url=None)
 
     @app.get("/", response_class=HTMLResponse)
@@ -34,10 +35,10 @@ def create_app(cfg: AppConfig) -> FastAPI:
     <label>Analog threshold</label><input name="analog_threshold" type="number" value="{cfg.polling.analog_threshold}">
 
     <div style="grid-column:1/-1;">
-      <button type="submit">Save</button>
+      <button type="submit">Save & Apply</button>
     </div>
   </form>
-  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. После изменения конфигурации перезапустите контейнер.</p>
+  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. Изменения применяются без перезапуска контейнера.</p>
 </body></html>
 """
 
@@ -56,6 +57,7 @@ def create_app(cfg: AppConfig) -> FastAPI:
         analog_interval_ms: int = Form(...),
         analog_threshold: int = Form(...),
     ):
+        # обновляем cfg
         cfg.mqtt.host = mqtt_host
         cfg.mqtt.port = int(mqtt_port)
         cfg.mqtt.username = mqtt_user or None
@@ -72,6 +74,14 @@ def create_app(cfg: AppConfig) -> FastAPI:
         cfg.polling.analog_threshold = int(analog_threshold)
 
         cfg.save()
+
+        # мягкий перезапуск сервиса с новой конфигурацией
+        try:
+            await service.reload(cfg)
+        except Exception as e:
+            # если что-то пошло не так — вернём 303 на главную, но добавим query msg
+            return RedirectResponse(f"/?error={type(e).__name__}", status_code=303)
+
         return RedirectResponse("/", status_code=303)
 
     @app.get("/status")

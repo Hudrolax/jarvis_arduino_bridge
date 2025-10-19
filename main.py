@@ -12,14 +12,12 @@ async def runner():
     cfg = AppConfig.load()
     service = AppService(cfg)
 
-    # Запускаем FastAPI (uvicorn) параллельно с сервисом
-    app = create_app(cfg)
+    app = create_app(cfg, service)
     config = uvicorn.Config(app, host="0.0.0.0", port=8080, log_level="info", loop="asyncio")
     server = uvicorn.Server(config)
 
     async def start_service():
         await service.start()
-        # не возвращаемся — живём пока не отменят
         while True:
             await asyncio.sleep(3600)
 
@@ -29,7 +27,6 @@ async def runner():
     svc_task = asyncio.create_task(start_service(), name="service")
     web_task = asyncio.create_task(start_web(), name="web")
 
-    # Грейсфул остановка по сигналу
     stop_evt = asyncio.Event()
 
     def _signal_handler():
@@ -40,7 +37,6 @@ async def runner():
         loop.add_signal_handler(s, _signal_handler)
 
     await stop_evt.wait()
-    # Завершаем
     await service.stop()
     web_task.cancel()
     svc_task.cancel()

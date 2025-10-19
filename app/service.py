@@ -20,44 +20,43 @@ A_CHANS: List[int] = list(range(16))  # 0..15
 class AppService:
     def __init__(self, cfg: AppConfig) -> None:
         self.cfg = cfg
-        self.arduino = ArduinoClient(cfg.serial.arduino_port, cfg.serial.arduino_baud)
-        self.watchdog = WatchdogPinger(cfg.serial.watchdog_port, cfg.serial.watchdog_baud, 3.0)
-        self.mqtt = MqttManager(
-            host=cfg.mqtt.host, port=cfg.mqtt.port,
-            username=cfg.mqtt.username, password=cfg.mqtt.password,
-            base_topic=cfg.mqtt.base_topic,
-            lwt_topic=f"{cfg.mqtt.base_topic}/availability",
-        )
         self._tasks: List[asyncio.Task] = []
         self._alive = False
 
-        # состояние:
+        # состояния
         self._s_state: Dict[int, bool] = {}
         self._p_state: Dict[int, bool] = {}
         self._a_state: Dict[int, int] = {}
 
+        # клиенты
+        self._build_clients()
+
+    def _build_clients(self) -> None:
+        self.arduino = ArduinoClient(self.cfg.serial.arduino_port, self.cfg.serial.arduino_baud)
+        self.watchdog = WatchdogPinger(self.cfg.serial.watchdog_port, self.cfg.serial.watchdog_baud, 3.0)
+        self.mqtt = MqttManager(
+            host=self.cfg.mqtt.host, port=self.cfg.mqtt.port,
+            username=self.cfg.mqtt.username, password=self.cfg.mqtt.password,
+            base_topic=self.cfg.mqtt.base_topic,
+            lwt_topic=f"{self.cfg.mqtt.base_topic}/availability",
+        )
+
     async def start(self) -> None:
         logger.info("Service starting...")
-        # MQTT
         await self.mqtt.connect()
 
-        # Arduino
         await self.arduino.open()
         ok = await self.arduino.handshake()
         if not ok:
             logger.error("Arduino handshake failed, exiting.")
             raise SystemExit(2)
 
-        # Watchdog
         self.watchdog.start()
 
-        # Discovery
         await self._publish_discovery()
 
-        # Subscribe to commands for all switches (P*)
         await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
 
-        # launch workers
         self._alive = True
         self._tasks = [
             asyncio.create_task(self._mqtt_commands_worker(), name="mqtt_cmds"),
@@ -76,10 +75,31 @@ class AppService:
                 await t
             except Exception:
                 pass
-        await self.mqtt.disconnect()
-        await self.arduino.close()
-        await self.watchdog.stop()
+        self._tasks.clear()
+        try:
+            await self.mqtt.disconnect()
+        except Exception:
+            pass
+        try:
+            await self.arduino.close()
+        except Exception:
+            pass
+        try:
+            await self.watchdog.stop()
+        except Exception:
+            pass
         logger.info("Service stopped.")
+
+    async def reload(self, new_cfg: AppConfig) -> None:
+        """
+        Мягкий перезапуск сервиса с новой конфигурацией (без перезапуска контейнера).
+        """
+        logger.info("Service reloading with new config...")
+        await self.stop()
+        self.cfg = new_cfg
+        self._build_clients()
+        await self.start()
+        logger.info("Service reloaded.")
 
     async def _publish_discovery(self) -> None:
         import json
@@ -87,23 +107,17 @@ class AppService:
             self.cfg.device.name, self.cfg.device.manufacturer,
             self.cfg.device.model, self.cfg.device.identifiers
         )
-        # Binary sensors for S pins
         for pin in S_PINS:
             topic, payload = cfg_binary_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
             await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
-        # Switches for P pins
         for pin in P_PINS:
             topic, payload = cfg_switch(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
             await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
-        # Analog sensors
         for ch in A_CHANS:
             topic, payload = cfg_analog_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, ch)
             await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
 
     async def _mqtt_commands_worker(self) -> None:
-        """
-        Читаем все входящие сообщения и реагируем на `<base>/P<pin>/set`
-        """
         async for topic, payload in self.mqtt.unfiltered_messages():
             try:
                 if not topic.startswith(f"{self.cfg.mqtt.base_topic}/"):
@@ -121,21 +135,15 @@ class AppService:
                 else:
                     state_code = 1 if as_bool(s) else 0
                 resp = await self.arduino.digital_write(pin, state_code)
-                # ответ 3333 или 4444:
                 new_state = True if resp == 3333 else False
                 self._p_state[pin] = new_state
                 await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=False)
             except Exception as e:
                 logger.exception("Error handling MQTT command: %s", e)
-                # критическая ошибка → стоп контейнер (даст рестарт)
                 raise SystemExit(3)
 
     async def _digital_poll_worker(self) -> None:
-        """
-        Быстрый цикл опроса S-пинов. Цель — ~digital_hz на ВСЕ пины (то есть цикл пробегает весь список).
-        """
         target_hz = max(1, self.cfg.polling.digital_hz)
-        # Время на один полный проход списка:
         interval = 1.0 / target_hz
         while self._alive:
             start = asyncio.get_running_loop().time()
@@ -151,15 +159,10 @@ class AppService:
             except Exception as e:
                 logger.exception("S-poll error: %s", e)
                 raise SystemExit(4)
-            # Дозададим частоту прохода по всем S-пинам
             elapsed = asyncio.get_running_loop().time() - start
-            sleep_for = max(0.0, interval - elapsed)
-            await asyncio.sleep(sleep_for)
+            await asyncio.sleep(max(0.0, interval - elapsed))
 
     async def _analog_poll_worker(self) -> None:
-        """
-        Опрос аналоговых каналов, публикация при изменении больше порога.
-        """
         thr = max(0, self.cfg.polling.analog_threshold)
         interval = max(50, self.cfg.polling.analog_interval_ms) / 1000.0
         while self._alive:

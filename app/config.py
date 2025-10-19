@@ -19,7 +19,7 @@ class MQTTConfig:
     port: int = 1883
     username: str | None = None
     password: str | None = None
-    base_topic: str = "jarvis_arduino"
+    base_topic: str = "home/jarvis_arduino"   # <-- по умолчанию в home/
     discovery_prefix: str = "homeassistant"
     retain_discovery: bool = True
 
@@ -32,9 +32,9 @@ class SerialPorts:
 
 @dataclass
 class Polling:
-    digital_hz: int = 50            # целевая частота опроса всех S-пинов
-    analog_interval_ms: int = 1000  # период публикации аналогов при значимом изменении
-    analog_threshold: int = 5        # порог значимости (единицы АЦП)
+    digital_hz: int = 50
+    analog_interval_ms: int = 1000
+    analog_threshold: int = 5
 
 @dataclass
 class AppConfig:
