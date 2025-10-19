@@ -25,7 +25,8 @@ dependencies = [
   "PyYAML==6.0.2",
   "pyserial==3.5",
   "pyserial-asyncio==0.6",
-  "asyncio-mqtt==0.16.2"
+  "asyncio-mqtt==0.16.2",
+  "python-multipart==0.0.9"
 ]
 
 ########################################

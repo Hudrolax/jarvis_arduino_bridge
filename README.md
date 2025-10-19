@@ -1,6 +1,6 @@
 # Jarvis Arduino Bridge
 
-Асинхронный мост: **Arduino Mega 2560 ⇄ Serial ⇄ Python ⇄ MQTT ⇄ Home Assistant**  
+Асинхронный мост: **Arduino Mega 2560 ⇄ Serial ⇄ Python ⇄ MQTT ⇄ Home Assistant**
 Параллельно пингует аппаратный **USB Watchdog**.
 
 ## Возможности

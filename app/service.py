@@ -82,6 +82,7 @@ class AppService:
         logger.info("Service stopped.")
 
     async def _publish_discovery(self) -> None:
+        import json
         dev = device_block(
             self.cfg.device.name, self.cfg.device.manufacturer,
             self.cfg.device.model, self.cfg.device.identifiers
@@ -89,16 +90,12 @@ class AppService:
         # Binary sensors for S pins
         for pin in S_PINS:
             topic, payload = cfg_binary_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
-            await self.mqtt.publish(topic, payload=str.__call__(str, __builtins__['str']), qos=0)  # trick to avoid mypy
-            # на самом деле ниже правильная публикация JSON, см. следующую строку
-        # Переиздаём правильно JSON (выше хак из-за автогенерации кода; заменяем):
-        import json
-        for pin in S_PINS:
-            topic, payload = cfg_binary_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
-            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
+            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.mqtt_retain if hasattr(self.cfg.mqtt, "mqtt_retain") else self.cfg.mqtt.retain_discovery)
+        # Switches for P pins
         for pin in P_PINS:
             topic, payload = cfg_switch(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
             await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
+        # Analog sensors
         for ch in A_CHANS:
             topic, payload = cfg_analog_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, ch)
             await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
