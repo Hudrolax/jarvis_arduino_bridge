@@ -55,6 +55,7 @@ class AppService:
 
         await self._publish_discovery()
 
+        # Подписка: <base>/Pxx/set (работает и с base содержащим слэши)
         await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
 
         self._alive = True
@@ -68,15 +69,11 @@ class AppService:
     async def stop(self) -> None:
         logger.info("Service stopping...")
         self._alive = False
-
-        # Корректно отменяем воркеры и ждём их завершения, не выбрасывая CancelledError наружу
         for t in self._tasks:
             t.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
-
-        # Закрываем внешние ресурсы
         try:
             await self.mqtt.disconnect()
         except Exception:
@@ -92,9 +89,6 @@ class AppService:
         logger.info("Service stopped.")
 
     async def reload(self, new_cfg: AppConfig) -> None:
-        """
-        Мягкий перезапуск сервиса с новой конфигурацией (без перезапуска контейнера).
-        """
         logger.info("Service reloading with new config...")
         await self.stop()
         self.cfg = new_cfg
@@ -121,24 +115,33 @@ class AppService:
     async def _mqtt_commands_worker(self) -> None:
         async for topic, payload in self.mqtt.unfiltered_messages():
             try:
-                if not topic.startswith(f"{self.cfg.mqtt.base_topic}/"):
+                base = self.cfg.mqtt.base_topic.rstrip("/")
+                prefix = base + "/"
+                if not topic.startswith(prefix):
                     continue
-                parts = topic.split("/")
-                if len(parts) != 3 or not parts[1].startswith("P") or parts[2] != "set":
+
+                # «относительный» топик после base_topic/
+                rel = topic[len(prefix):]  # ожидаем 'Pxx/set'
+                parts = rel.split("/")
+                if len(parts) != 2 or not parts[0].startswith("P") or parts[1] != "set":
                     continue
-                pin = int(parts[1][1:])
+
+                pin = int(parts[0][1:])
                 if pin not in P_PINS:
                     logger.warning("Command for unknown P-pin: %s", topic)
                     continue
+
                 s = payload.decode("utf-8", errors="ignore").strip()
                 if s.upper() == "TOGGLE":
                     state_code = 2
                 else:
                     state_code = 1 if as_bool(s) else 0
+
                 resp = await self.arduino.digital_write(pin, state_code)
                 new_state = True if resp == 3333 else False
                 self._p_state[pin] = new_state
                 await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=False)
+
             except Exception as e:
                 logger.exception("Error handling MQTT command: %s", e)
                 raise SystemExit(3)
