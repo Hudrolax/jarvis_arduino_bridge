@@ -25,7 +25,7 @@ dependencies = [
   "PyYAML==6.0.2",
   "pyserial==3.5",
   "pyserial-asyncio==0.6",
-  "asyncio-mqtt==0.16.2",
+  "aiomqtt>=1.0.0,<2.0.0",
   "python-multipart==0.0.9"
 ]
 
@@ -41,7 +41,7 @@ dev = [
 # 4) Где искать пакеты (каталог app/)
 ########################################
 [tool.setuptools.packages.find]
-where = [""]               # корень пайтон-пакетов
+where = [""]
 exclude = ["tests*"]
 
 ########################################

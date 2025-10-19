@@ -90,7 +90,7 @@ class AppService:
         # Binary sensors for S pins
         for pin in S_PINS:
             topic, payload = cfg_binary_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
-            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.mqtt_retain if hasattr(self.cfg.mqtt, "mqtt_retain") else self.cfg.mqtt.retain_discovery)
+            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
         # Switches for P pins
         for pin in P_PINS:
             topic, payload = cfg_switch(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
