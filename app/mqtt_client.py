@@ -67,10 +67,11 @@ class MqttManager:
 
     async def unfiltered_messages(self) -> AsyncIterator[Tuple[str, bytes]]:
         """
-        Итератор (topic, payload) для всех входящих сообщений.
-        Предпочитаем aiomqtt.Client.messages() (без депрекейта),
-        но при отсутствии падаем обратно на unfiltered_messages().
-        Корректно завершается при отмене задачи (CancelledError).
+        Итератор (topic:str, payload:bytes) для всех входящих сообщений.
+        - Предпочитаем aiomqtt.Client.messages() (без депрекейта),
+          но при отсутствии падаем обратно на unfiltered_messages().
+        - Корректно завершается при отмене задачи (CancelledError).
+        - Нормализуем типы: topic -> str, payload -> bytes.
         """
         assert self.client is not None
         ctx = getattr(self.client, "messages", None)
@@ -86,4 +87,21 @@ class MqttManager:
                 except asyncio.CancelledError:
                     # Тихо выходим при отмене воркера (reload/stop)
                     return
-                yield msg.topic, msg.payload
+
+                # aiomqtt 1.x: msg.topic — объект Topic; в старой либе — строка.
+                topic_obj = getattr(msg, "topic", "")
+                try:
+                    topic = topic_obj if isinstance(topic_obj, str) else str(topic_obj)
+                except Exception:
+                    topic = str(topic_obj)
+
+                # payload может быть bytes или memoryview
+                payload_obj = getattr(msg, "payload", b"")
+                if isinstance(payload_obj, memoryview):
+                    payload = payload_obj.tobytes()
+                elif isinstance(payload_obj, bytes):
+                    payload = payload_obj
+                else:
+                    payload = bytes(payload_obj)
+
+                yield topic, payload
