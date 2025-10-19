@@ -1,0 +1,15 @@
+services:
+  jarvis_arduino:
+    build: .
+    container_name: jarvis_arduino
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Moscow
+    ports:
+      - "8080:8080"     # веб-интерфейс настройки
+    volumes:
+      - ./data:/data    # конфиг сохраняется в /data/config.yaml
+    devices:
+      - "/dev/ttyACM1:/dev/ttyACM1"  # Arduino Mega 2560
+      - "/dev/ttyACM0:/dev/ttyACM0"  # USB Watchdog
+    privileged: true
