@@ -19,7 +19,7 @@ class MQTTConfig:
     port: int = 1883
     username: str | None = None
     password: str | None = None
-    base_topic: str = "home/jarvis_arduino"   # <-- по умолчанию в home/
+    base_topic: str = "home/jarvis_arduino"   # default base topic
     discovery_prefix: str = "homeassistant"
     retain_discovery: bool = True
 
@@ -37,11 +37,16 @@ class Polling:
     analog_threshold: int = 5
 
 @dataclass
+class Paths:
+    state_path: str = "/data/state.json"   # файл для хранения состояний P
+
+@dataclass
 class AppConfig:
     device: DeviceInfo = field(default_factory=DeviceInfo)
     mqtt: MQTTConfig = field(default_factory=MQTTConfig)
     serial: SerialPorts = field(default_factory=SerialPorts)
     polling: Polling = field(default_factory=Polling)
+    paths: Paths = field(default_factory=Paths)
 
     @staticmethod
     def load(path: str = DEFAULT_CONFIG_PATH) -> "AppConfig":
@@ -56,6 +61,7 @@ class AppConfig:
             mqtt=MQTTConfig(**raw.get("mqtt", {})),
             serial=SerialPorts(**raw.get("serial", {})),
             polling=Polling(**raw.get("polling", {})),
+            paths=Paths(**raw.get("paths", {})),
         )
 
     def save(self, path: str = DEFAULT_CONFIG_PATH) -> None:
@@ -85,6 +91,9 @@ class AppConfig:
                 "digital_hz": self.polling.digital_hz,
                 "analog_interval_ms": self.polling.analog_interval_ms,
                 "analog_threshold": self.polling.analog_threshold,
+            },
+            "paths": {
+                "state_path": self.paths.state_path,
             },
         }
         os.makedirs(os.path.dirname(path), exist_ok=True)

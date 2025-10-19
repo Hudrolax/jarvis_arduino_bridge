@@ -39,7 +39,7 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
       <button type="submit">Save & Apply</button>
     </div>
   </form>
-  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. Изменения применяются без перезапуска контейнера.</p>
+  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. State path: <code>{cfg.paths.state_path}</code>.</p>
 </body></html>
 """
 
@@ -58,7 +58,6 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
         analog_interval_ms: int = Form(...),
         analog_threshold: int = Form(...),
     ):
-        # обновляем cfg
         cfg.mqtt.host = mqtt_host
         cfg.mqtt.port = int(mqtt_port)
         cfg.mqtt.username = mqtt_user or None
@@ -76,14 +75,12 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
 
         cfg.save()
 
-        # мягкий перезапуск сервиса с новой конфигурацией
         try:
             await service.reload(cfg)
         except asyncio.CancelledError:
-            # корректное завершение фоновых задач во время reload — считаем успехом
             return RedirectResponse("/", status_code=303)
-        except Exception as e:
-            return RedirectResponse(f"/?error={type(e).__name__}", status_code=303)
+        except Exception:
+            return RedirectResponse(f"/?error=reload_failed", status_code=303)
 
         return RedirectResponse("/", status_code=303)
 
@@ -94,6 +91,7 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
             "serial": {"arduino_port": cfg.serial.arduino_port, "watchdog_port": cfg.serial.watchdog_port},
             "polling": {"digital_hz": cfg.polling.digital_hz, "analog_interval_ms": cfg.polling.analog_interval_ms,
                         "analog_threshold": cfg.polling.analog_threshold},
+            "paths": {"state_path": cfg.paths.state_path},
         })
 
     return app

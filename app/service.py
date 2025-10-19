@@ -9,6 +9,7 @@ from .watchdog import WatchdogPinger
 from .mqtt_client import MqttManager
 from .ha_discovery import device_block, cfg_binary_sensor, cfg_switch, cfg_analog_sensor
 from .utils import on_off, as_bool
+from .state_store import load_p_states, save_p_states
 
 logger = logging.getLogger("service")
 
@@ -53,9 +54,13 @@ class AppService:
 
         self.watchdog.start()
 
+        # Восстановить последние состояния P (если есть)
+        await self._restore_pins()
+
+        # Discovery (после восстановления тут уже будут актуальные state-публикации)
         await self._publish_discovery()
 
-        # Подписка: <base>/Pxx/set (работает и с base содержащим слэши)
+        # Подписка: <base>/Pxx/set
         await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
 
         self._alive = True
@@ -96,6 +101,27 @@ class AppService:
         await self.start()
         logger.info("Service reloaded.")
 
+    async def _restore_pins(self) -> None:
+        """Программно восстановить P-пины из файла состояний."""
+        path = self.cfg.paths.state_path
+        saved = load_p_states(path)
+        if not saved:
+            logger.info("No saved P states found at %s", path)
+            return
+
+        logger.info("Restoring P states from %s: %s", path, saved)
+        for pin, state in saved.items():
+            if pin not in P_PINS:
+                continue
+            try:
+                resp = await self.arduino.digital_write(pin, 1 if state else 0)
+                new_state = True if resp == 3333 else False
+                self._p_state[pin] = new_state
+                # Публикуем фактическое состояние
+                await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=False)
+            except Exception as e:
+                logger.warning("Failed to restore P%d: %s", pin, e)
+
     async def _publish_discovery(self) -> None:
         import json
         dev = device_block(
@@ -119,9 +145,7 @@ class AppService:
                 prefix = base + "/"
                 if not topic.startswith(prefix):
                     continue
-
-                # «относительный» топик после base_topic/
-                rel = topic[len(prefix):]  # ожидаем 'Pxx/set'
+                rel = topic[len(prefix):]  # 'Pxx/set'
                 parts = rel.split("/")
                 if len(parts) != 2 or not parts[0].startswith("P") or parts[1] != "set":
                     continue
@@ -140,7 +164,15 @@ class AppService:
                 resp = await self.arduino.digital_write(pin, state_code)
                 new_state = True if resp == 3333 else False
                 self._p_state[pin] = new_state
+
+                # Публикуем состояние
                 await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=False)
+
+                # Сохраняем на диск актуальные P-состояния
+                try:
+                    save_p_states(self.cfg.paths.state_path, self._p_state)
+                except Exception as e:
+                    logger.warning("Failed to persist P states: %s", e)
 
             except Exception as e:
                 logger.exception("Error handling MQTT command: %s", e)
