@@ -68,14 +68,15 @@ class AppService:
     async def stop(self) -> None:
         logger.info("Service stopping...")
         self._alive = False
+
+        # Корректно отменяем воркеры и ждём их завершения, не выбрасывая CancelledError наружу
         for t in self._tasks:
             t.cancel()
-        for t in self._tasks:
-            try:
-                await t
-            except Exception:
-                pass
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+
+        # Закрываем внешние ресурсы
         try:
             await self.mqtt.disconnect()
         except Exception:

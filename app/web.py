@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from .config import AppConfig, DEFAULT_CONFIG_PATH
@@ -78,8 +79,10 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
         # мягкий перезапуск сервиса с новой конфигурацией
         try:
             await service.reload(cfg)
+        except asyncio.CancelledError:
+            # корректное завершение фоновых задач во время reload — считаем успехом
+            return RedirectResponse("/", status_code=303)
         except Exception as e:
-            # если что-то пошло не так — вернём 303 на главную, но добавим query msg
             return RedirectResponse(f"/?error={type(e).__name__}", status_code=303)
 
         return RedirectResponse("/", status_code=303)

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 from typing import AsyncIterator, Tuple, Union
 
@@ -48,7 +49,6 @@ class MqttManager:
             try:
                 await self.publish(self.lwt_topic, "offline", qos=1, retain=True)
             except Exception:
-                # даже если publish не прошёл, всё равно закрываем
                 pass
             try:
                 await self.client.__aexit__(None, None, None)  # вместо deprecated .disconnect()
@@ -70,11 +70,10 @@ class MqttManager:
         Итератор (topic, payload) для всех входящих сообщений.
         Предпочитаем aiomqtt.Client.messages() (без депрекейта),
         но при отсутствии падаем обратно на unfiltered_messages().
+        Корректно завершается при отмене задачи (CancelledError).
         """
         assert self.client is not None
-        # Предпочтительно:
         ctx = getattr(self.client, "messages", None)
-        # Back-compat:
         if ctx is None:
             ctx = getattr(self.client, "unfiltered_messages", None)
         if ctx is None:
@@ -82,5 +81,9 @@ class MqttManager:
 
         async with ctx() as messages:
             while True:
-                msg = await messages.__anext__()
+                try:
+                    msg = await messages.__anext__()
+                except asyncio.CancelledError:
+                    # Тихо выходим при отмене воркера (reload/stop)
+                    return
                 yield msg.topic, msg.payload
