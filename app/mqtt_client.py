@@ -2,18 +2,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import AsyncIterator, Tuple, Union
+from aiomqtt import Client, Will
 
 logger = logging.getLogger("mqtt")
-
-# Основная библиотека — aiomqtt; если её вдруг нет, откатываемся на asyncio-mqtt.
-try:
-    import aiomqtt as mqttlib  # type: ignore
-    from aiomqtt import Client, MqttError, Will  # type: ignore
-    _USING_AIO = True
-except Exception:  # pragma: no cover
-    from asyncio_mqtt import Client, MqttError, Will  # type: ignore
-    import asyncio_mqtt as mqttlib  # type: ignore
-    _USING_AIO = False
 
 
 class MqttManager:
@@ -33,13 +24,10 @@ class MqttManager:
         return Client(self.host, port=self.port, username=self.username, password=self.password, will=will)
 
     async def connect(self) -> None:
-        """
-        Подключение без депрекейта: через __aenter__ (эквивалент async with Client(...) as c).
-        """
         self.client = self._make_client()
         await self.client.__aenter__()  # вместо deprecated .connect()
         await self.publish(self.lwt_topic, "online", qos=1, retain=True)
-        logger.info("MQTT connected to %s:%d (%s)", self.host, self.port, "aiomqtt" if _USING_AIO else "asyncio-mqtt")
+        logger.info("MQTT connected to %s:%d (%s)", self.host, self.port, "aiomqtt")
 
     async def disconnect(self) -> None:
         """

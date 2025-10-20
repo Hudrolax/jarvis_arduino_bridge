@@ -19,9 +19,9 @@ class MQTTConfig:
     port: int = 1883
     username: str | None = None
     password: str | None = None
-    base_topic: str = "home/jarvis_arduino"   # default base topic
+    base_topic: str = "home/jarvis_arduino"
     discovery_prefix: str = "homeassistant"
-    retain_discovery: bool = True
+    retain_discovery: bool = True  # discovery всегда retain
 
 @dataclass
 class SerialPorts:
@@ -38,7 +38,8 @@ class Polling:
 
 @dataclass
 class Paths:
-    state_path: str = "/data/state.json"   # файл для хранения состояний P
+    state_path: str = "/data/state.json"      # хранение состояний P
+    failsafe_path: str = "/data/failsafe.yaml"  # конфиг S→P для оффлайна
 
 @dataclass
 class AppConfig:
@@ -94,6 +95,7 @@ class AppConfig:
             },
             "paths": {
                 "state_path": self.paths.state_path,
+                "failsafe_path": self.paths.failsafe_path,
             },
         }
         os.makedirs(os.path.dirname(path), exist_ok=True)

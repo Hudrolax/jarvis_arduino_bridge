@@ -10,6 +10,7 @@ from .mqtt_client import MqttManager
 from .ha_discovery import device_block, cfg_binary_sensor, cfg_switch, cfg_analog_sensor
 from .utils import on_off, as_bool
 from .state_store import load_p_states, save_p_states
+from .failsafe import load_failsafe_map
 
 logger = logging.getLogger("service")
 
@@ -29,6 +30,12 @@ class AppService:
         self._p_state: Dict[int, bool] = {}
         self._a_state: Dict[int, int] = {}
 
+        # MQTT online/offline
+        self._mqtt_online: bool = False
+
+        # failsafe map S->P
+        self._failsafe_map: Dict[int, int] = {}
+
         # клиенты
         self._build_clients()
 
@@ -44,23 +51,37 @@ class AppService:
 
     async def start(self) -> None:
         logger.info("Service starting...")
-        await self.mqtt.connect()
+        # Failsafe map
+        self._failsafe_map = load_failsafe_map(self.cfg.paths.failsafe_path)
+        if self._failsafe_map:
+            logger.info("Failsafe map loaded: %s", self._failsafe_map)
+        else:
+            logger.info("Failsafe map is empty or not found.")
 
+        # MQTT
+        await self.mqtt.connect()
+        self._mqtt_online = True
+
+        # Arduino
         await self.arduino.open()
         ok = await self.arduino.handshake()
         if not ok:
             logger.error("Arduino handshake failed, exiting.")
             raise SystemExit(2)
 
+        # Watchdog
         self.watchdog.start()
 
-        # Восстановить последние состояния P (если есть)
+        # Восстановить P и опубликовать их retained
         await self._restore_pins()
 
-        # Discovery (после восстановления тут уже будут актуальные state-публикации)
+        # Discovery (retain)
         await self._publish_discovery()
 
-        # Подписка: <base>/Pxx/set
+        # Полная публикация текущих состояний (retained)
+        await self._publish_all_states(retain=True)
+
+        # Подписка на команды
         await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
 
         self._alive = True
@@ -83,6 +104,7 @@ class AppService:
             await self.mqtt.disconnect()
         except Exception:
             pass
+        self._mqtt_online = False
         try:
             await self.arduino.close()
         except Exception:
@@ -101,8 +123,20 @@ class AppService:
         await self.start()
         logger.info("Service reloaded.")
 
+    async def _safe_publish(self, topic: str, payload: str, *, qos: int = 1, retain: bool = True) -> None:
+        """
+        Публикуем с отловом ошибок. При ошибке — помечаем MQTT offline (failsafe активируется).
+        """
+        if not self._mqtt_online:
+            return
+        try:
+            await self.mqtt.publish(topic, payload, qos=qos, retain=retain)
+        except Exception as e:
+            logger.warning("MQTT publish failed, switching to offline: %s", e)
+            self._mqtt_online = False
+
     async def _restore_pins(self) -> None:
-        """Программно восстановить P-пины из файла состояний."""
+        """Восстановить P-пины из файла состояний и опубликовать retained."""
         path = self.cfg.paths.state_path
         saved = load_p_states(path)
         if not saved:
@@ -117,8 +151,7 @@ class AppService:
                 resp = await self.arduino.digital_write(pin, 1 if state else 0)
                 new_state = True if resp == 3333 else False
                 self._p_state[pin] = new_state
-                # Публикуем фактическое состояние
-                await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=False)
+                await self._safe_publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=True)
             except Exception as e:
                 logger.warning("Failed to restore P%d: %s", pin, e)
 
@@ -130,53 +163,104 @@ class AppService:
         )
         for pin in S_PINS:
             topic, payload = cfg_binary_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
-            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
+            await self._safe_publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
         for pin in P_PINS:
             topic, payload = cfg_switch(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
-            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
+            await self._safe_publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
         for ch in A_CHANS:
             topic, payload = cfg_analog_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, ch)
-            await self.mqtt.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=self.cfg.mqtt.retain_discovery)
+            await self._safe_publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
+
+    async def _publish_all_states(self, *, retain: bool) -> None:
+        """Однократная публикация всех текущих состояний (S/P/A)."""
+        # S — прочитать разово
+        for pin in S_PINS:
+            try:
+                val = await self.arduino.digital_read(pin)
+                is_high = (val == 1111)
+                self._s_state[pin] = is_high
+                await self._safe_publish(f"{self.cfg.mqtt.base_topic}/S{pin}/state", on_off(is_high), qos=1, retain=retain)
+            except Exception as e:
+                logger.warning("Initial S read failed for %d: %s", pin, e)
+
+        # P — взять из известного состояния (после restore) и запостить
+        for pin in P_PINS:
+            if pin in self._p_state:
+                await self._safe_publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(self._p_state[pin]), qos=1, retain=retain)
+
+        # A — разово прочитать и запостить
+        for ch in A_CHANS:
+            try:
+                val = await self.arduino.analog_read(ch)
+                self._a_state[ch] = val
+                await self._safe_publish(f"{self.cfg.mqtt.base_topic}/A{ch}/state", str(val), qos=0, retain=retain)
+            except Exception as e:
+                logger.warning("Initial A read failed for %d: %s", ch, e)
+
+    async def _ensure_mqtt_online(self) -> None:
+        """Пытаемся переподключиться к MQTT, публикуем discovery и весь state, подписываемся на set."""
+        backoff = 1.0
+        while self._alive and not self._mqtt_online:
+            try:
+                await self.mqtt.connect()
+                self._mqtt_online = True
+                await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
+                await self._publish_discovery()
+                await self._publish_all_states(retain=True)
+                logger.info("Reconnected to MQTT and republished state.")
+                return
+            except Exception as e:
+                logger.warning("Reconnect to MQTT failed: %s", e)
+                await asyncio.sleep(min(backoff, 30.0))
+                backoff = min(backoff * 2.0, 30.0)
 
     async def _mqtt_commands_worker(self) -> None:
-        async for topic, payload in self.mqtt.unfiltered_messages():
+        while self._alive:
+            if not self._mqtt_online:
+                await self._ensure_mqtt_online()
+                # если так и не удалось — подождём и повторим
+                if not self._mqtt_online:
+                    await asyncio.sleep(2.0)
+                    continue
             try:
-                base = self.cfg.mqtt.base_topic.rstrip("/")
-                prefix = base + "/"
-                if not topic.startswith(prefix):
-                    continue
-                rel = topic[len(prefix):]  # 'Pxx/set'
-                parts = rel.split("/")
-                if len(parts) != 2 or not parts[0].startswith("P") or parts[1] != "set":
-                    continue
+                async for topic, payload in self.mqtt.unfiltered_messages():
+                    base = self.cfg.mqtt.base_topic.rstrip("/")
+                    prefix = base + "/"
+                    if not topic.startswith(prefix):
+                        continue
+                    rel = topic[len(prefix):]  # 'Pxx/set'
+                    parts = rel.split("/")
+                    if len(parts) != 2 or not parts[0].startswith("P") or parts[1] != "set":
+                        continue
 
-                pin = int(parts[0][1:])
-                if pin not in P_PINS:
-                    logger.warning("Command for unknown P-pin: %s", topic)
-                    continue
+                    pin = int(parts[0][1:])
+                    if pin not in P_PINS:
+                        logger.warning("Command for unknown P-pin: %s", topic)
+                        continue
 
-                s = payload.decode("utf-8", errors="ignore").strip()
-                if s.upper() == "TOGGLE":
-                    state_code = 2
-                else:
-                    state_code = 1 if as_bool(s) else 0
+                    s = payload.decode("utf-8", errors="ignore").strip()
+                    if s.upper() == "TOGGLE":
+                        state_code = 2
+                    else:
+                        state_code = 1 if as_bool(s) else 0
 
-                resp = await self.arduino.digital_write(pin, state_code)
-                new_state = True if resp == 3333 else False
-                self._p_state[pin] = new_state
+                    resp = await self.arduino.digital_write(pin, state_code)
+                    new_state = True if resp == 3333 else False
+                    self._p_state[pin] = new_state
 
-                # Публикуем состояние
-                await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=False)
+                    # Публикуем retained, сохраняем на диск
+                    await self._safe_publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=True)
+                    try:
+                        save_p_states(self.cfg.paths.state_path, self._p_state)
+                    except Exception as e:
+                        logger.warning("Failed to persist P states: %s", e)
 
-                # Сохраняем на диск актуальные P-состояния
-                try:
-                    save_p_states(self.cfg.paths.state_path, self._p_state)
-                except Exception as e:
-                    logger.warning("Failed to persist P states: %s", e)
-
+            except asyncio.CancelledError:
+                return
             except Exception as e:
-                logger.exception("Error handling MQTT command: %s", e)
-                raise SystemExit(3)
+                logger.warning("MQTT consumer failed, going offline: %s", e)
+                self._mqtt_online = False
+                # и тут же цикл продолжит попытки переподключения
 
     async def _digital_poll_worker(self) -> None:
         target_hz = max(1, self.cfg.polling.digital_hz)
@@ -190,8 +274,26 @@ class AppService:
                     prev = self._s_state.get(pin)
                     if prev is None or prev != is_high:
                         self._s_state[pin] = is_high
-                        await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/S{pin}/state",
-                                                on_off(is_high), qos=1, retain=False)
+                        # онлайн → публикуем retained; оффлайн → просто обновляем стейт
+                        await self._safe_publish(f"{self.cfg.mqtt.base_topic}/S{pin}/state", on_off(is_high), qos=1, retain=True)
+
+                        # FAILSAFE: при оффлайне зеркалим S->P (если задано)
+                        if not self._mqtt_online and pin in self._failsafe_map:
+                            p_pin = self._failsafe_map[pin]
+                            # защита от лишних записей
+                            if self._p_state.get(p_pin) != is_high:
+                                try:
+                                    resp = await self.arduino.digital_write(p_pin, 1 if is_high else 0)
+                                    new_state = True if resp == 3333 else False
+                                    self._p_state[p_pin] = new_state
+                                    # состояние сохраним на диск (на случай рестарта)
+                                    try:
+                                        save_p_states(self.cfg.paths.state_path, self._p_state)
+                                    except Exception as e:
+                                        logger.warning("Persist P states failed (failsafe): %s", e)
+                                except Exception as e:
+                                    logger.warning("Failsafe write P%d from S%d failed: %s", p_pin, pin, e)
+
             except Exception as e:
                 logger.exception("S-poll error: %s", e)
                 raise SystemExit(4)
@@ -208,7 +310,7 @@ class AppService:
                     prev = self._a_state.get(ch)
                     if prev is None or abs(val - prev) >= thr:
                         self._a_state[ch] = val
-                        await self.mqtt.publish(f"{self.cfg.mqtt.base_topic}/A{ch}/state", str(val), qos=0, retain=False)
+                        await self._safe_publish(f"{self.cfg.mqtt.base_topic}/A{ch}/state", str(val), qos=0, retain=True)
             except Exception as e:
                 logger.exception("A-poll error: %s", e)
                 raise SystemExit(5)

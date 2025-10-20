@@ -39,7 +39,8 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
       <button type="submit">Save & Apply</button>
     </div>
   </form>
-  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. State path: <code>{cfg.paths.state_path}</code>.</p>
+  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. State: <code>{cfg.paths.state_path}</code>. Failsafe: <code>{cfg.paths.failsafe_path}</code>.
+     Failsafe конфиг — YAML с разделом <code>bindings</code> (список пар s/p) или <code>map</code> (словарь).</p>
 </body></html>
 """
 
@@ -91,7 +92,7 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
             "serial": {"arduino_port": cfg.serial.arduino_port, "watchdog_port": cfg.serial.watchdog_port},
             "polling": {"digital_hz": cfg.polling.digital_hz, "analog_interval_ms": cfg.polling.analog_interval_ms,
                         "analog_threshold": cfg.polling.analog_threshold},
-            "paths": {"state_path": cfg.paths.state_path},
+            "paths": {"state_path": cfg.paths.state_path, "failsafe_path": cfg.paths.failsafe_path},
         })
 
     return app
