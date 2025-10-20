@@ -14,10 +14,9 @@ from .failsafe import load_failsafe_map
 
 logger = logging.getLogger("service")
 
-# Пины из прошивки:
 S_PINS: List[int] = [38,40,42,44,46,48,50,52,53,39,37,35,33,31,29,27]
 P_PINS: List[int] = [36,34,32,30,28,26,24,22,13,12,11,10,9,8,7,6,5,4,3,2,45,47,14,15,16,17,18,19,49,51,23,25]
-A_CHANS: List[int] = list(range(16))  # 0..15
+A_CHANS: List[int] = list(range(16))
 
 class AppService:
     def __init__(self, cfg: AppConfig) -> None:
@@ -25,18 +24,13 @@ class AppService:
         self._tasks: List[asyncio.Task] = []
         self._alive = False
 
-        # состояния
         self._s_state: Dict[int, bool] = {}
         self._p_state: Dict[int, bool] = {}
         self._a_state: Dict[int, int] = {}
 
-        # MQTT online/offline
         self._mqtt_online: bool = False
-
-        # failsafe map S->P
         self._failsafe_map: Dict[int, int] = {}
 
-        # клиенты
         self._build_clients()
 
     def _build_clients(self) -> None:
@@ -51,37 +45,24 @@ class AppService:
 
     async def start(self) -> None:
         logger.info("Service starting...")
-        # Failsafe map
         self._failsafe_map = load_failsafe_map(self.cfg.paths.failsafe_path)
-        if self._failsafe_map:
-            logger.info("Failsafe map loaded: %s", self._failsafe_map)
-        else:
-            logger.info("Failsafe map is empty or not found.")
+        logger.info("Failsafe map: %s", self._failsafe_map or "empty")
 
-        # MQTT
         await self.mqtt.connect()
         self._mqtt_online = True
 
-        # Arduino
         await self.arduino.open()
         ok = await self.arduino.handshake()
         if not ok:
             logger.error("Arduino handshake failed, exiting.")
             raise SystemExit(2)
 
-        # Watchdog
         self.watchdog.start()
 
-        # Восстановить P и опубликовать их retained
         await self._restore_pins()
-
-        # Discovery (retain)
         await self._publish_discovery()
-
-        # Полная публикация текущих состояний (retained)
         await self._publish_all_states(retain=True)
 
-        # Подписка на команды
         await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
 
         self._alive = True
@@ -124,25 +105,41 @@ class AppService:
         logger.info("Service reloaded.")
 
     async def _safe_publish(self, topic: str, payload: str, *, qos: int = 1, retain: bool = True) -> None:
-        """
-        Публикуем с отловом ошибок. При ошибке — помечаем MQTT offline (failsafe активируется).
-        """
         if not self._mqtt_online:
             return
         try:
             await self.mqtt.publish(topic, payload, qos=qos, retain=retain)
         except Exception as e:
-            logger.warning("MQTT publish failed, switching to offline: %s", e)
-            self._mqtt_online = False
+            if self._mqtt_online:
+                logger.warning("MQTT publish failed (%s). Entering failsafe and disconnecting...", e)
+                self._mqtt_online = False
+                try:
+                    await self.mqtt.disconnect()
+                except Exception:
+                    pass
+
+    async def _ensure_mqtt_online(self) -> None:
+        backoff = 1.0
+        while self._alive and not self._mqtt_online:
+            try:
+                await self.mqtt.connect()
+                self._mqtt_online = True
+                await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
+                await self._publish_discovery()
+                await self._publish_all_states(retain=True)
+                logger.info("Reconnected to MQTT, leaving failsafe.")
+                return
+            except Exception as e:
+                logger.warning("Reconnect to MQTT failed: %s", e)
+                await asyncio.sleep(min(backoff, 30.0))
+                backoff = min(backoff * 2.0, 30.0)
 
     async def _restore_pins(self) -> None:
-        """Восстановить P-пины из файла состояний и опубликовать retained."""
         path = self.cfg.paths.state_path
         saved = load_p_states(path)
         if not saved:
             logger.info("No saved P states found at %s", path)
             return
-
         logger.info("Restoring P states from %s: %s", path, saved)
         for pin, state in saved.items():
             if pin not in P_PINS:
@@ -172,8 +169,6 @@ class AppService:
             await self._safe_publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
 
     async def _publish_all_states(self, *, retain: bool) -> None:
-        """Однократная публикация всех текущих состояний (S/P/A)."""
-        # S — прочитать разово
         for pin in S_PINS:
             try:
                 val = await self.arduino.digital_read(pin)
@@ -183,12 +178,10 @@ class AppService:
             except Exception as e:
                 logger.warning("Initial S read failed for %d: %s", pin, e)
 
-        # P — взять из известного состояния (после restore) и запостить
         for pin in P_PINS:
             if pin in self._p_state:
                 await self._safe_publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(self._p_state[pin]), qos=1, retain=retain)
 
-        # A — разово прочитать и запостить
         for ch in A_CHANS:
             try:
                 val = await self.arduino.analog_read(ch)
@@ -197,28 +190,10 @@ class AppService:
             except Exception as e:
                 logger.warning("Initial A read failed for %d: %s", ch, e)
 
-    async def _ensure_mqtt_online(self) -> None:
-        """Пытаемся переподключиться к MQTT, публикуем discovery и весь state, подписываемся на set."""
-        backoff = 1.0
-        while self._alive and not self._mqtt_online:
-            try:
-                await self.mqtt.connect()
-                self._mqtt_online = True
-                await self.mqtt.subscribe(f"{self.cfg.mqtt.base_topic}/+/set")
-                await self._publish_discovery()
-                await self._publish_all_states(retain=True)
-                logger.info("Reconnected to MQTT and republished state.")
-                return
-            except Exception as e:
-                logger.warning("Reconnect to MQTT failed: %s", e)
-                await asyncio.sleep(min(backoff, 30.0))
-                backoff = min(backoff * 2.0, 30.0)
-
     async def _mqtt_commands_worker(self) -> None:
         while self._alive:
             if not self._mqtt_online:
                 await self._ensure_mqtt_online()
-                # если так и не удалось — подождём и повторим
                 if not self._mqtt_online:
                     await asyncio.sleep(2.0)
                     continue
@@ -228,7 +203,7 @@ class AppService:
                     prefix = base + "/"
                     if not topic.startswith(prefix):
                         continue
-                    rel = topic[len(prefix):]  # 'Pxx/set'
+                    rel = topic[len(prefix):]
                     parts = rel.split("/")
                     if len(parts) != 2 or not parts[0].startswith("P") or parts[1] != "set":
                         continue
@@ -239,28 +214,26 @@ class AppService:
                         continue
 
                     s = payload.decode("utf-8", errors="ignore").strip()
-                    if s.upper() == "TOGGLE":
-                        state_code = 2
-                    else:
-                        state_code = 1 if as_bool(s) else 0
+                    state_code = 2 if s.upper() == "TOGGLE" else (1 if as_bool(s) else 0)
 
                     resp = await self.arduino.digital_write(pin, state_code)
                     new_state = True if resp == 3333 else False
                     self._p_state[pin] = new_state
 
-                    # Публикуем retained, сохраняем на диск
                     await self._safe_publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(new_state), qos=1, retain=True)
                     try:
                         save_p_states(self.cfg.paths.state_path, self._p_state)
                     except Exception as e:
                         logger.warning("Failed to persist P states: %s", e)
 
+                    if not self._mqtt_online:
+                        break
+
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 logger.warning("MQTT consumer failed, going offline: %s", e)
                 self._mqtt_online = False
-                # и тут же цикл продолжит попытки переподключения
 
     async def _digital_poll_worker(self) -> None:
         target_hz = max(1, self.cfg.polling.digital_hz)
@@ -274,19 +247,15 @@ class AppService:
                     prev = self._s_state.get(pin)
                     if prev is None or prev != is_high:
                         self._s_state[pin] = is_high
-                        # онлайн → публикуем retained; оффлайн → просто обновляем стейт
                         await self._safe_publish(f"{self.cfg.mqtt.base_topic}/S{pin}/state", on_off(is_high), qos=1, retain=True)
 
-                        # FAILSAFE: при оффлайне зеркалим S->P (если задано)
                         if not self._mqtt_online and pin in self._failsafe_map:
                             p_pin = self._failsafe_map[pin]
-                            # защита от лишних записей
                             if self._p_state.get(p_pin) != is_high:
                                 try:
                                     resp = await self.arduino.digital_write(p_pin, 1 if is_high else 0)
                                     new_state = True if resp == 3333 else False
                                     self._p_state[p_pin] = new_state
-                                    # состояние сохраним на диск (на случай рестарта)
                                     try:
                                         save_p_states(self.cfg.paths.state_path, self._p_state)
                                     except Exception as e:
