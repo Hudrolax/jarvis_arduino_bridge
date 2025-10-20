@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from .config import AppConfig, DEFAULT_CONFIG_PATH
 from .service import AppService
@@ -10,13 +10,20 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
+        # подготовим HTML для чекбоксов A0..A15
+        a_rows = []
+        for i in range(16):
+            checked = "checked" if cfg.inputs.analog_enabled[i] else ""
+            a_rows.append(f'<label>A{i}</label><input name="a{i}" type="checkbox" {checked}>')
+        a_grid = "\n".join(a_rows)
+
         return f"""
 <!doctype html>
 <html>
 <head><meta charset="utf-8"><title>Jarvis Arduino Bridge</title></head>
-<body style="font-family:system-ui;max-width:800px;margin:2rem auto;">
+<body style="font-family:system-ui;max-width:900px;margin:2rem auto;">
   <h1>Jarvis Arduino Bridge</h1>
-  <form method="post" action="/save" style="display:grid;grid-template-columns: 200px 1fr;gap:.5rem 1rem;">
+  <form method="post" action="/save" style="display:grid;grid-template-columns: 220px 1fr;gap:.5rem 1rem;">
     <h2 style="grid-column:1/-1;">MQTT</h2>
     <label>Host</label><input name="mqtt_host" value="{cfg.mqtt.host}">
     <label>Port</label><input name="mqtt_port" type="number" value="{cfg.mqtt.port}">
@@ -35,17 +42,20 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
     <label>Analog interval (ms)</label><input name="analog_interval_ms" type="number" value="{cfg.polling.analog_interval_ms}">
     <label>Analog threshold</label><input name="analog_threshold" type="number" value="{cfg.polling.analog_threshold}">
 
-    <div style="grid-column:1/-1;">
+    <h2 style="grid-column:1/-1;">Analog inputs (publish enable)</h2>
+    {a_grid}
+
+    <div style="grid-column:1/-1;margin-top:.5rem;">
       <button type="submit">Save & Apply</button>
     </div>
   </form>
-  <p>Config path: <code>{DEFAULT_CONFIG_PATH}</code>. State: <code>{cfg.paths.state_path}</code>. Failsafe: <code>{cfg.paths.failsafe_path}</code>.
-     Failsafe конфиг — YAML с разделом <code>bindings</code> (список пар s/p) или <code>map</code> (словарь).</p>
+  <p>Config: <code>{DEFAULT_CONFIG_PATH}</code> • State: <code>{cfg.paths.state_path}</code> • Failsafe: <code>{cfg.paths.failsafe_path}</code></p>
 </body></html>
 """
 
     @app.post("/save")
     async def save(
+        request: Request,
         mqtt_host: str = Form(...),
         mqtt_port: int = Form(...),
         mqtt_user: str = Form(""),
@@ -59,6 +69,8 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
         analog_interval_ms: int = Form(...),
         analog_threshold: int = Form(...),
     ):
+        form = await request.form()
+
         cfg.mqtt.host = mqtt_host
         cfg.mqtt.port = int(mqtt_port)
         cfg.mqtt.username = mqtt_user or None
@@ -73,6 +85,12 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
         cfg.polling.digital_hz = int(digital_hz)
         cfg.polling.analog_interval_ms = int(analog_interval_ms)
         cfg.polling.analog_threshold = int(analog_threshold)
+
+        # собрать галочки A0..A15: если чекбокс пришёл в форме — канал включён
+        enabled = []
+        for i in range(16):
+            enabled.append(f"a{i}" in form)
+        cfg.inputs.analog_enabled = enabled
 
         cfg.save()
 
@@ -93,6 +111,7 @@ def create_app(cfg: AppConfig, service: AppService) -> FastAPI:
             "polling": {"digital_hz": cfg.polling.digital_hz, "analog_interval_ms": cfg.polling.analog_interval_ms,
                         "analog_threshold": cfg.polling.analog_threshold},
             "paths": {"state_path": cfg.paths.state_path, "failsafe_path": cfg.paths.failsafe_path},
+            "inputs": {"analog_enabled": cfg.inputs.analog_enabled},
         })
 
     return app

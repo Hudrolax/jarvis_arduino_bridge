@@ -164,11 +164,15 @@ class AppService:
         for pin in P_PINS:
             topic, payload = cfg_switch(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, pin)
             await self._safe_publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
+        # публикуем discovery только для включённых A-каналов
         for ch in A_CHANS:
+            if not self.cfg.inputs.analog_enabled[ch]:
+                continue
             topic, payload = cfg_analog_sensor(self.cfg.mqtt.discovery_prefix, self.cfg.mqtt.base_topic, dev, ch)
             await self._safe_publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
 
     async def _publish_all_states(self, *, retain: bool) -> None:
+        # S (всегда публикуем)
         for pin in S_PINS:
             try:
                 val = await self.arduino.digital_read(pin)
@@ -178,11 +182,15 @@ class AppService:
             except Exception as e:
                 logger.warning("Initial S read failed for %d: %s", pin, e)
 
+        # P (всегда публикуем, если знаем состояние)
         for pin in P_PINS:
             if pin in self._p_state:
                 await self._safe_publish(f"{self.cfg.mqtt.base_topic}/P{pin}/state", on_off(self._p_state[pin]), qos=1, retain=retain)
 
+        # A — только включённые
         for ch in A_CHANS:
+            if not self.cfg.inputs.analog_enabled[ch]:
+                continue
             try:
                 val = await self.arduino.analog_read(ch)
                 self._a_state[ch] = val
@@ -275,6 +283,9 @@ class AppService:
         while self._alive:
             try:
                 for ch in A_CHANS:
+                    if not self.cfg.inputs.analog_enabled[ch]:
+                        # читаем можно и не читать, но так меньше шуметь шиной
+                        continue
                     val = await self.arduino.analog_read(ch)
                     prev = self._a_state.get(ch)
                     if prev is None or abs(val - prev) >= thr:

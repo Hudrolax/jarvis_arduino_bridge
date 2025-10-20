@@ -21,7 +21,7 @@ class MQTTConfig:
     password: str | None = None
     base_topic: str = "home/jarvis_arduino"
     discovery_prefix: str = "homeassistant"
-    retain_discovery: bool = True  # discovery всегда retain
+    retain_discovery: bool = True
 
 @dataclass
 class SerialPorts:
@@ -38,8 +38,20 @@ class Polling:
 
 @dataclass
 class Paths:
-    state_path: str = "/data/state.json"      # хранение состояний P
-    failsafe_path: str = "/data/failsafe.yaml"  # конфиг S→P для оффлайна
+    state_path: str = "/data/state.json"
+    failsafe_path: str = "/data/failsafe.yaml"
+
+@dataclass
+class Inputs:
+    # включён/выключен каждый A-канал для публикации в MQTT
+    analog_enabled: List[bool] = field(default_factory=lambda: [True] * 16)
+
+    def normalize(self) -> None:
+        # гарантируем длину 16
+        if len(self.analog_enabled) < 16:
+            self.analog_enabled = (self.analog_enabled + [True] * 16)[:16]
+        elif len(self.analog_enabled) > 16:
+            self.analog_enabled = self.analog_enabled[:16]
 
 @dataclass
 class AppConfig:
@@ -48,6 +60,7 @@ class AppConfig:
     serial: SerialPorts = field(default_factory=SerialPorts)
     polling: Polling = field(default_factory=Polling)
     paths: Paths = field(default_factory=Paths)
+    inputs: Inputs = field(default_factory=Inputs)
 
     @staticmethod
     def load(path: str = DEFAULT_CONFIG_PATH) -> "AppConfig":
@@ -57,15 +70,19 @@ class AppConfig:
             return cfg
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-        return AppConfig(
+        cfg = AppConfig(
             device=DeviceInfo(**raw.get("device", {})),
             mqtt=MQTTConfig(**raw.get("mqtt", {})),
             serial=SerialPorts(**raw.get("serial", {})),
             polling=Polling(**raw.get("polling", {})),
             paths=Paths(**raw.get("paths", {})),
+            inputs=Inputs(**raw.get("inputs", {})),
         )
+        cfg.inputs.normalize()
+        return cfg
 
     def save(self, path: str = DEFAULT_CONFIG_PATH) -> None:
+        self.inputs.normalize()
         data: Dict[str, Any] = {
             "device": {
                 "name": self.device.name,
@@ -96,6 +113,9 @@ class AppConfig:
             "paths": {
                 "state_path": self.paths.state_path,
                 "failsafe_path": self.paths.failsafe_path,
+            },
+            "inputs": {
+                "analog_enabled": list(self.inputs.analog_enabled),
             },
         }
         os.makedirs(os.path.dirname(path), exist_ok=True)
